@@ -10,6 +10,11 @@ except ImportError:
     ff = shutil.which('ffmpeg') or sys.exit('need ffmpeg: pip install imageio-ffmpeg')
 shots = [('establish', 60), ('pour', 110), ('milk', 96), ('cross', 96)]
 fps_in = 24 / step; fade = 0.5
+if any(f.startswith('film_') for f in os.listdir(frames)):      # continuous take (scene2.py film): no cuts, no crossfades
+    subprocess.run([ff, '-y', '-loglevel', 'error', '-framerate', f'{fps_in}', '-start_number', '0', '-i', os.path.join(frames, 'film_%04d.png'),   # glob patterns are unsupported on Windows
+                    '-vf', f'scale={width}:-2,setsar=1,format=yuv420p,fps=24', '-c:v', 'libx264', '-preset', 'slow', '-crf', '16',
+                    '-pix_fmt', 'yuv420p', '-movflags', '+faststart', out], check=True)
+    sys.exit(print('film:', out))
 inputs, chains, durs = [], [], []
 for i, (s, n) in enumerate(shots):
     inputs += ['-framerate', f'{fps_in}', '-pattern_type', 'glob', '-i', os.path.join(frames, f'{s}_*.png')]

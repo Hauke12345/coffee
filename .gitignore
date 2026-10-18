@@ -2,3 +2,5 @@ frames/
 __pycache__/
 *.mp4
 !media/*.mp4
+frames720*/
+*.log

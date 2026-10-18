@@ -250,9 +250,151 @@ def render_shot(shot, frames, rx, ry, spp, out_fn):
         if os.environ.get('RESUME') and os.path.exists(out_fn(k)): continue
         sc.render.filepath = out_fn(k); bpy.ops.render.render(write_still=True); print('rendered', shot, k, flush=True)
 
+# ---------------- continuous film: one take on one physical clock, camera glides between the shot framings ----------------
+FILM = 266                     # establish 0-59, pour 60-169, milk 170-265; film time = steam time (steam result ends at 11.08 s)
+F_POUR, F_MILK = 60, 170
+POUR_STOP = 96                 # pour frame at which the stream leaves the spout for good
+CAM_KEYS = [(0, 'establish', 0), (20, 'establish', 0), (62, 'pour', 0), (150, 'pour', 0), (184, 'milk', 0), (198, 'milk', 0),
+            (230, 'cross', 0), (265, 'cross', 1)]          # (film frame, framing, dolly fraction)
+FADE = (204, 228)              # film frames over which the front half of the mug and coffee fades out (cut-away reveal)
+SETTLE = (162, 180)            # the simulated pour surface dissolves into the resting surface of the milk part
+
+def smooth(x): x = min(1.0, max(0.0, x)); return x * x * (3 - 2 * x)
+
+def cam_path():
+    """Monotone cubic (PCHIP) through the camera keys: C1-smooth moves that settle on each framing, no overshoot."""
+    from scipy.interpolate import PchipInterpolator
+    fr, rows = [], []
+    for f, shot, s in CAM_KEYS:
+        loc, tgt, lens, fs = CAMS[shot]; loc = np.array(loc, float)
+        if shot == 'cross': loc = loc + np.array([-1.5, 10.0, -2.5]) * s
+        fr.append(f); rows.append(np.concatenate([loc, tgt, [lens, fs]]))
+    return PchipInterpolator(np.array(fr, float), np.array(rows), axis=0, extrapolate=False)
+
+def film_camera(path, f):
+    v = path(min(max(f, CAM_KEYS[0][0]), CAM_KEYS[-1][0])); loc, tgt, lens, fs = v[:3], v[3:6], v[6], v[7]
+    cam = bpy.context.scene.camera
+    if cam is None:
+        bpy.ops.object.camera_add(); cam = bpy.context.object; bpy.context.scene.camera = cam
+    cam.location = loc; d = tgt - loc
+    cam.rotation_euler = (math.atan2(math.hypot(d[0], d[1]), -d[2]), 0, math.atan2(d[1], d[0]) - math.pi / 2)
+    cam.data.lens = lens; cam.data.dof.use_dof = True; cam.data.dof.focus_distance = float(np.linalg.norm(d))
+    cam.data.dof.aperture_fstop = fs / 100; cam.data.clip_start = 0.5; cam.data.clip_end = 2000
+
+def blend_pose(A, B, s, pivot, lift):
+    """Move a rigid body from pose A to pose B: its pivot point travels on a straight line raised by an arc, the rotation is slerped."""
+    qa, qb = A.to_quaternion(), B.to_quaternion(); q = qa.slerp(qb, s); R = q.to_matrix().to_4x4()
+    pa, pb = A @ pivot, B @ pivot; p = pa.lerp(pb, s) + Vector((0, 0, lift * math.sin(math.pi * s)))
+    return Matrix.Translation(p - R.to_3x3() @ pivot) @ R
+
+def fade_material(src):
+    """Copy of a material whose surface can be mixed to fully transparent through a Value node (returned)."""
+    m = src.copy(); m.name = src.name + '_fade'; N = m.node_tree.nodes; L = m.node_tree.links
+    out = next(n for n in N if n.type == 'OUTPUT_MATERIAL'); shader = out.inputs['Surface'].links[0].from_socket
+    mix = N.new('ShaderNodeMixShader'); tr = N.new('ShaderNodeBsdfTransparent'); val = N.new('ShaderNodeValue'); val.outputs[0].default_value = 0.0
+    L.new(val.outputs[0], mix.inputs[0]); L.new(shader, mix.inputs[1]); L.new(tr.outputs[0], mix.inputs[2]); L.new(mix.outputs[0], out.inputs['Surface'])
+    return m, val.outputs[0]
+
+def half(me, name, front, cap):
+    """Front (y < 0) or back (y > 0) half of a mesh, cut at y = 0; the cut is closed when cap."""
+    bm = bmesh.new(); bm.from_mesh(me)
+    bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:], plane_co=(0, 0, 0), plane_no=(0, 1 if front else -1, 0), clear_outer=True)
+    if cap: bmesh.ops.holes_fill(bm, edges=[e for e in bm.edges if e.is_boundary], sides=0)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    out = bpy.data.meshes.new(name); bm.to_mesh(out); bm.free()
+    for f in out.polygons: f.use_smooth = abs(f.normal.y) < 0.9
+    return out
+
+def render_film(frames, rx, ry, spp, out_fn):
+    sc = CS.setup(rx, ry, spp); CS.build_room(); m = mats(); decorate()
+    if os.environ.get('VOL_STEP'): sc.cycles.volume_step_rate = float(os.environ['VOL_STEP'])   # fast preview knobs
+    if os.environ.get('BOUNCES'): sc.cycles.max_bounces = sc.cycles.transmission_bounces = int(os.environ['BOUNCES'])
+    if os.environ.get('HAZE') == '0':
+        for o in bpy.data.objects:
+            if o.type == 'MESH' and any(ms and ms.name == 'haze' for ms in o.data.materials): o.hide_render = True
+    mug_me = M.lathe_mesh('mug', M.MUG_PROFILE, 160)
+    arc =[(M.R_OUT - 0.25 + 2.2 * math.sin(a), 0, 4.3 + 2.6 * math.cos(a)) for a in np.linspace(0.02 * math.pi, 0.98 * math.pi, 32)]   # ends sink into the wall
+    mug = M.obj('mug', mug_me, m['mug'])
+    handle = M.tube('mug_handle', arc, [0.42] * len(arc), m['mug']); handle.scale = (1.0, 1.25, 1.0)
+    # cut-away pieces: capped back halves, open front halves that fade out
+    mug_fade, f_mug = fade_material(m['mug'])
+    mug_b = M.obj('mug_back', half(mug_me, 'mug_back', False, True), m['mug'])
+    mug_f = M.obj('mug_front', half(mug_me, 'mug_front', True, False), mug_fade)
+    hnd_b = M.obj('handle_back', half(handle.data, 'handle_back', False, True), m['mug']); hnd_b.scale = handle.scale
+    hnd_f = M.obj('handle_front', half(handle.data, 'handle_front', True, False), mug_fade); hnd_f.scale = handle.scale
+    pot = M.build_pot(m['pot']); jug = M.build_jug(m['jug'])
+    for p in pot.children: p.data.materials.clear(); p.data.materials.append(m['pot'])
+    for p in jug.children: p.data.materials.clear(); p.data.materials.append(m['jug'])
+    pot_table = Matrix.Translation((-20, 9, -M.BASE)) @ Matrix.Rotation(math.radians(-25), 4, 'Z')
+    jug_table = Matrix.Translation((15, 10, -M.BASE)) @ Matrix.Rotation(math.radians(200), 4, 'Z')
+    pot_pour = M.pot_matrix(M.POT_TILT, tip_world=M.P_TIP); jug_pour = M.jug_matrix(M.JUG_TILT, tip_world=M.M_TIP)
+    path = cam_path()
+    st_path = os.path.join(SEQ2, 'steam_atlas.npz'); steam = np.load(st_path) if os.path.exists(st_path) else None; st_img = None
+    if steam is not None:   # physical extinction of 2 um droplets: beta = 3 LWC / (2 rho_w r), LWC = rho_air * fog
+        st_img = atlas_steam(steam, 1.5 * 1.1 / (1000.0 * 2e-6) / 100.0)
+    milk = np.load(os.path.join(SEQ2, 'milk.npz'))
+    pour_t = np.load(os.path.join(SEQ2, 'pour', 't.npy'))
+    # resting coffee for the milk part: whole (before the reveal) and as halves (during and after it)
+    top_img = color_image('top', milk['top'][0].astype(np.float32)); sec_img = color_image('sec', milk['sec'][0].astype(np.float32))
+    top_mat = image_material('coffee_top', top_img); top_fade, f_top = fade_material(top_mat); cof_fade, f_cof = fade_material(m['coffee']); liq_fade, f_liq = fade_material(m['coffee'])
+    top, body = coffee_body(LEVEL1, top_mat, m['coffee'])
+    top_b = M.obj('coffee_top_back', half(top.data, 'coffee_top_back', False, False), top_mat)
+    top_f = M.obj('coffee_top_front', half(top.data, 'coffee_top_front', True, False), top_fade)
+    body_f = M.obj('coffee_body_front', half(body.data, 'coffee_body_front', True, False), cof_fade); body_f.location = body.location
+    for o in (body_f,):
+        for p in o.data.polygons: p.use_smooth = False
+    section = section_plane(sec_img, float(milk['H']) * 100)
+    liquid = stream = None
+    for f in frames:
+        t = f / FPS
+        if st_img is not None:
+            i = int(np.argmin(np.abs(steam['t'] - t))); CS.set_image(st_img, steam['atlas'][i].astype(np.float32))
+        # pot: lifted into the pour before it starts, set back once the stream has left the spout
+        s = smooth((f - 22) / (F_POUR - 2 - 22)) - smooth((f - (F_POUR + POUR_STOP + 1)) / 32)
+        place(pot, blend_pose(pot_table, pot_pour, s, Vector((0, 0, 7)), 6.0))
+        place(jug, blend_pose(jug_table, jug_pour, smooth((f - 130) / (F_MILK - 1 - 130)), Vector((0, 0, 4)), 4.0))
+        # coffee
+        if liquid is not None: bpy.data.objects.remove(liquid, do_unlink=True); liquid = None
+        settle = smooth((f - SETTLE[0]) / (SETTLE[1] - SETTLE[0])); f_liq.default_value = settle
+        if F_POUR <= f < SETTLE[1]:
+            i = int(np.argmin(np.abs(pour_t - (f - F_POUR) / FPS)))   # holds the last surface after the pour result ends
+            bpy.ops.wm.stl_import(filepath=os.path.join(SEQ2, 'pour', f'{i:04d}.stl'))
+            liquid = bpy.context.selected_objects[0]; liquid.scale = (100, 100, 100)
+            liquid.data.materials.clear(); liquid.data.materials.append(liq_fade)
+            for p in liquid.data.polygons: p.use_smooth = True
+        km = f - F_MILK; tm = km / FPS
+        if km >= 0:
+            i = int(np.argmin(np.abs(milk['t'] - tm)))
+            set_rgb(top_img, milk['top'][i].astype(np.float32)); set_rgb(sec_img, milk['sec'][i].astype(np.float32))
+        if stream is not None: bpy.data.objects.remove(stream, do_unlink=True); stream = None
+        if km >= 0:
+            frac = 1.0 if tm < MILK_POUR - 0.05 else max(0.0, 1 - (tm - MILK_POUR + 0.05) / 0.1)
+            if frac > 0.02: stream = milk_stream(m['milk'], frac)
+        # cut-away reveal
+        a = smooth((f - FADE[0]) / (FADE[1] - FADE[0])); split = f >= FADE[0]
+        for o in (mug, handle, top, body): o.hide_render = split or (o in (top, body) and f < SETTLE[0])
+        for o in (mug_b, hnd_b, top_b, section): o.hide_render = not split
+        for o in (mug_f, hnd_f, top_f, body_f): o.hide_render = not split or a >= 1.0
+        for v in (f_mug, f_top, f_cof): v.default_value = a
+        film_camera(path, f)
+        if os.environ.get('RESUME') and os.path.exists(out_fn(f)): continue
+        sc.render.filepath = out_fn(f); bpy.ops.render.render(write_still=True); print('rendered film', f, flush=True)
+
 if __name__ == '__main__':
     mode = sys.argv[1]
-    if mode == 'still':
+    if mode in ('film', 'filmstill'):
+        # film      RES_X RES_Y SAMPLES OUTDIR [STEP] [F0 F1]
+        # filmstill FRAME RES_X RES_Y SAMPLES OUT.png
+        if mode == 'filmstill':
+            k, rx, ry, spp, out = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6]
+            render_film([k], rx, ry, spp, lambda _: out)
+        else:
+            rx, ry, spp, outdir = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), os.path.abspath(sys.argv[5])   # Blender resolves relative paths against the drive root
+            step = int(sys.argv[6]) if len(sys.argv) > 6 else 1
+            f0, f1 = (int(sys.argv[7]), int(sys.argv[8])) if len(sys.argv) > 8 else (0, FILM)
+            os.makedirs(outdir, exist_ok=True)
+            render_film(range(f0, f1, step), rx, ry, spp, lambda k: os.path.join(outdir, f'film_{k:04d}.png'))
+    elif mode == 'still':
         shot, k, rx, ry, spp, out = sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6]), sys.argv[7]
         render_shot(shot, [k], rx, ry, spp, lambda _: out)
     else:

@@ -4,13 +4,18 @@
 
 Preview (half resolution, fast render): [media/preview.mp4](media/preview.mp4)
 
-A ~13.6 s film in four shots, 24 fps:
-1. **establish** (2.5 s): the morning table with an empty mug.
-2. **pour** (4.6 s): coffee from a tilted ceramic pot fills the mug.
-3. **milk** (4 s): cold milk is poured from a jug for 3 s.
-4. **cross** (4 s): a cut-away of the mug shows the milk mixing while the jug is still pouring.
+Continuous take, 720p (8 samples, OIDN, then an ffmpeg `nlmeans` pass): [media/coffee_film_720p.mp4](media/coffee_film_720p.mp4)
 
-Shots are joined with 0.5 s crossfades.
+An 11.1 s film in one continuous take, 24 fps (`scene2.py film`). It runs on the simulations' own clock, so film time is steam time:
+1. **establish** (2.5 s): the morning table with an empty mug. The pot lifts and tilts into the pour.
+2. **pour** (4.6 s): coffee from the tilted ceramic pot fills the mug. Once the stream stops, the pot is set back and the
+   jug moves in.
+3. **milk** (4 s): cold milk is poured from the jug for 3 s. Meanwhile the front half of the mug fades away into a
+   cut-away, which shows the milk mixing while the jug is still pouring.
+
+There are no cuts. The camera glides between the framings along a monotone cubic path. The simulated pour surface
+dissolves into the resting surface of the milk part. The old four-shot version is still available as
+`scene2.py anim SHOT ...`.
 
 ## Geometry → CFD → render
 - `models.py` builds the ceramic pot, mug and milk jug in Blender. The handles' ends sink into the walls, so they
@@ -51,7 +56,8 @@ Shots are joined with 0.5 s crossfades.
 1. Install Python 3.13 from python.org, then run
    `py -3.13 -m pip install bpy==5.2.2 numpy scipy scikit-image imageio-ffmpeg`.
 2. Run `render_film2.bat`.
-   - It renders 362 frames at 1920×1080 and 256 samples, then joins them into `coffee_film_v2.mp4`.
+   - It renders 266 frames at 1920×1080 and 256 samples, then joins them into `coffee_film_v2.mp4`.
+   - For a fast draft, run `scene2.py film 1280 720 8 frames720` with `VOL_STEP=4` and `BOUNCES=4` set.
    - Expect a few hours on an RTX 3070. For a quicker test, set `SPP=64`.
    - If it is interrupted, run it again: frames that already exist are skipped.
 

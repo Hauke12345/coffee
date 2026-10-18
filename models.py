@@ -100,8 +100,8 @@ def build_pot(mat, coffee_mat=None):
     return root
 
 # ---------------- milk jug (local: base centre at origin, lip towards +x) ----------------
-JUG_PROFILE = [(0.0, 0.0), (2.6, 0.0), (2.9, 0.4), (3.1, 2.5), (2.7, 5.5), (2.5, 7.2), (2.65, 7.8), (2.45, 7.9), (2.3, 7.5),
-               (0.0, 7.5)]
+JUG_PROFILE = [(0.0, 0.0), (2.6, 0.0), (2.9, 0.4), (3.1, 2.5), (2.7, 5.5), (2.5, 7.2), (2.65, 7.8), (2.45, 7.9), (2.25, 7.6),
+               (2.28, 7.2), (2.48, 5.5), (2.86, 2.5), (2.66, 0.55), (2.3, 0.3), (0.0, 0.3)]          # open, 2-3 mm wall
 JUG_TIP_LOCAL = Vector((3.4, 0, 7.9))
 
 def jug_matrix(tilt, tip_world=None, base_world=None):
@@ -113,8 +113,8 @@ def jug_matrix(tilt, tip_world=None, base_world=None):
 
 def build_jug(mat):
     parts = [obj('jug_body', lathe_mesh('jug_body', JUG_PROFILE, 128), mat)]
-    lip = bezier((2.2, 0, 7.0), (2.9, 0, 7.6), (3.2, 0, 7.8), (3.4, 0, 7.9), 10)
-    parts.append(tube('jug_lip', lip, list(np.linspace(0.7, 0.35, len(lip))), mat))
+    lip = bezier((2.4, 0, 7.75), (2.9, 0, 7.85), (3.2, 0, 7.9), (3.4, 0, 7.9), 10)   # sits on the rim, outside the opening
+    parts.append(tube('jug_lip', lip, list(np.linspace(0.42, 0.3, len(lip))), mat))
     arc = [(-2.3 - 1.8 * math.sin(a), 0, 4.0 + 2.4 * math.cos(a)) for a in np.linspace(0.0, math.pi, 28)]   # ends sink into the body
     parts.append(tube('jug_handle', arc, [0.35] * len(arc), mat))
     root = bpy.data.objects.new('jug', None); bpy.context.collection.objects.link(root)
