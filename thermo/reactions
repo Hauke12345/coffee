@@ -1,0 +1,6 @@
+FoamFile
+{
+    version 2.0; format ascii; class dictionary; object reactions;
+}
+species ( H2O O2 N2 );
+reactions { }
